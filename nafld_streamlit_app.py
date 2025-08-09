@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Dict
 import streamlit as st
 import pandas as pd
 
-# NEW: PDF parsing
+# PDF parsing
 try:
     import pdfplumber
     PDF_ENABLED = True
@@ -27,21 +27,20 @@ def _safe_log(x: Optional[float]) -> Optional[float]:
 def fli_score(tg_mgdl, bmi, ggt_ul, waist_cm) -> Optional[float]:
     ln_tg = _safe_log(tg_mgdl)
     ln_ggt = _safe_log(ggt_ul)
-    if None in (ln_tg, ln_ggt) or tg_mgdl in (None,"") or bmi in (None,"") or waist_cm in (None,""):
+    if None in (ln_tg, ln_ggt) or tg_mgdl in (None, "") or bmi in (None, "") or waist_cm in (None, ""):
         return None
-    L = 0.953*ln_tg + 0.139*float(bmi) + 0.718*ln_ggt + 0.053*float(waist_cm) - 15.745
+    L = 0.953 * ln_tg + 0.139 * float(bmi) + 0.718 * ln_ggt + 0.053 * float(waist_cm) - 15.745
     f = (math.exp(L) / (1 + math.exp(L))) * 100.0
     return max(0.0, min(100.0, f))
 
 def fli_category_action(fli: Optional[float]) -> Tuple[Optional[str], Optional[str], str]:
-    # returns (category, action, color)
     if fli is None:
         return None, None, "#cccccc"
     if fli < 30:
-        return "Low (fatty liver unlikely)", "Maintain lifestyle; periodic monitoring.", "#2e7d32"  # green
+        return "Low (fatty liver unlikely)", "Maintain lifestyle; periodic monitoring.", "#2e7d32"
     if fli < 60:
-        return "Intermediate (cannot rule in/out)", "Consider ultrasound or repeat after lifestyle optimisation.", "#f9a825"  # yellow
-    return "High (fatty liver likely)", "Proceed to fibrosis staging (NFS, FIB-4, APRI).", "#c62828"  # red
+        return "Intermediate (cannot rule in/out)", "Consider ultrasound or repeat after lifestyle optimisation.", "#f9a825"
+    return "High (fatty liver likely)", "Proceed to fibrosis staging (NFS, FIB-4, APRI).", "#c62828"
 
 def fib4_score(age, ast_ul, alt_ul, platelets) -> Optional[float]:
     try:
@@ -68,7 +67,7 @@ def nfs_score(age, bmi, diab_ifg, ast_ul, alt_ul, platelets, albumin_gdl) -> Opt
         )
         if alt_ul <= 0:
             return None
-        return -1.675 + 0.037*age + 0.094*bmi + 1.13*diab_ifg + 0.99*(ast_ul/alt_ul) - 0.013*platelets - 0.66*albumin_gdl
+        return -1.675 + 0.037 * age + 0.094 * bmi + 1.13 * diab_ifg + 0.99 * (ast_ul / alt_ul) - 0.013 * platelets - 0.66 * albumin_gdl
     except Exception:
         return None
 
@@ -134,63 +133,69 @@ def combine_liver_health(fib4_sub, apri_sub, nfs_sub) -> Optional[float]:
     if nfs_sub is None:
         fib = fib4_sub or 0.0
         apr = apri_sub or 0.0
-        return max(0.0, min(100.0, 0.7*fib + 0.3*apr))
-    return max(0.0, min(100.0, 0.5*(fib4_sub or 0.0) + 0.25*(apri_sub or 0.0) + 0.25*(nfs_sub or 0.0)))
+        return max(0.0, min(100.0, 0.7 * fib + 0.3 * apr))
+    return max(0.0, min(100.0, 0.5 * (fib4_sub or 0.0) + 0.25 * (apri_sub or 0.0) + 0.25 * (nfs_sub or 0.0)))
 
 def color_box(text: str, color: str):
-    st.markdown(f"""
+    st.markdown(
+        f"""
         <div style="background:{color};padding:12px;border-radius:8px;color:white;font-weight:600;">
             {text}
         </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-# ---------- PDF Parsing (beta) ----------
+# ---------- PDF Parsing (tolerant) ----------
 
+# Looser patterns: unit optional; tolerate line breaks / spacing between label and value
 LAB_PATTERNS = {
-    "ast_ul": r"(?:AST|SGOT)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:U/?L|IU/?L)",
-    "alt_ul": r"(?:ALT|SGPT)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:U/?L|IU/?L)",
-    "ggt_ul": r"(?:GGT|Gamma[\-\s]*glutamyl[\-\s]*transferase)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:U/?L|IU/?L)",
-    "tg_mgdl": r"(?:Triglycerides?|TG)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*mg/?dL",
-    "platelets": r"(?:Platelets?|Platelet\s*count)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:x?\s*10\^?3\s*/\s*µ?L|10\^9/L|10\^9\s*/\s*L|10\^3/µL|10\^3/uL|10\^3/\s*µL|10\^3/\s*uL|10\^3\s*\/\s*µ?L)?",
-    "albumin_gdl": r"(?:Albumin)\s*[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:g/?dL|g/?L)",
-    "uln_ast": r"(?:AST|SGOT)[^\n]{0,30}?(?:reference|ref\.?\s*range|range)[^\n]{0,20}?(\d{2,3})\s*(?:U/?L|IU/?L)"
+    "ast_ul": r"(?:AST|SGOT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    "alt_ul": r"(?:ALT|SGPT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    "ggt_ul": r"(?:GGT|Gamma[\-\s]*glutamyl[\-\s]*transferase)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    "tg_mgdl": r"(?:Triglycerides?|TG)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    "platelets": r"(?:Platelets?|Platelet\s*count)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    "albumin_gdl": r"(?:Albumin)[^\d]{0,80}?(\d+(?:\.\d+)?)",
+    # Try to infer ULN AST from a range like "3 - 50 U/L" on same line as the word range
+    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})\s*(?:U/?L|IU/?L)?",
 }
 
-def parse_pdf_bytes(pdf_bytes) -> Dict[str, float]:
+def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
+    """
+    Return (values_dict, full_text) for debug.
+    """
     out: Dict[str, float] = {}
+    full = ""
     try:
-        import pdfplumber
         with pdfplumber.open(pdf_bytes) as pdf:
             texts = []
             for page in pdf.pages:
                 texts.append(page.extract_text() or "")
             full = "\n".join(texts)
     except Exception:
-        return out
+        return out, full
 
-    # normalize
-    text = re.sub(r"[^\S\r\n]+", " ", full, flags=re.M)  # collapse spaces
+    text = re.sub(r"[^\S\r\n]+", " ", full, flags=re.M)
     text = text.replace("\u00b5", "µ")
 
     def search_and_set(key, pattern):
         m = re.search(pattern, text, flags=re.I)
         if m:
             try:
-                val = float(m.group(1))
-                out[key] = val
+                out[key] = float(m.group(1))
             except Exception:
                 pass
 
     for k, pattern in LAB_PATTERNS.items():
         search_and_set(k, pattern)
 
-    # Unit adjustments
+    # Albumin g/L → g/dL if we can detect the g/L unit nearby
     if "albumin_gdl" in out:
-        m = re.search(r"Albumin[^\n]{0,20}?([0-9]+(?:\.[0-9]+)?)\s*(g/?dL|g/?L)", text, flags=re.I)
+        m = re.search(r"Albumin[^\n]{0,40}?(\d+(?:\.\d+)?)\s*(g/?dL|g/?L)", text, flags=re.I)
         if m and "g/L" in m.group(2).replace(" ", "").lower():
             out["albumin_gdl"] = out["albumin_gdl"] / 10.0
 
-    return out
+    return out, full
 
 # ---------- App UI ----------
 
@@ -203,17 +208,21 @@ with st.expander("Upload Lab PDF (beta: text-based PDFs only)"):
     else:
         up = st.file_uploader("Upload a lab PDF (text-based, not scanned)", type=["pdf"])
         if up is not None:
-            data = parse_pdf_bytes(up)
+            data, raw_text = parse_pdf_bytes_return_text(up)
             if data:
                 st.success("Parsed these fields from the PDF (you can edit below):")
                 st.json({k: round(v, 3) for k, v in data.items()})
-                # prefill session state so the form below picks them up
+                # Pre-fill widgets
+                mapping = {"ast_ul": "ast", "alt_ul": "alt", "ggt_ul": "ggt", "tg_mgdl": "tg",
+                           "platelets": "platelets", "albumin_gdl": "albumin", "uln_ast": "uln_ast"}
                 for key, val in data.items():
-                    mapping = {"ast_ul":"ast","alt_ul":"alt","ggt_ul":"ggt","tg_mgdl":"tg","platelets":"platelets","albumin_gdl":"albumin","uln_ast":"uln_ast"}
                     if key in mapping:
                         st.session_state[mapping[key]] = float(val)
             else:
                 st.info("Couldn't read values. If the PDF is scanned, please type manually.")
+
+            with st.expander("Debug: show raw extracted text (optional)"):
+                st.text(raw_text if raw_text else "No text extracted.")
 
 with st.expander("Single-Patient Assessment", expanded=True):
     col1, col2, col3 = st.columns(3)
@@ -228,7 +237,8 @@ with st.expander("Single-Patient Assessment", expanded=True):
         ast = st.number_input("AST (U/L)", min_value=1.0, max_value=5000.0, value=35.0, step=0.5, key="ast")
         alt = st.number_input("ALT (U/L)", min_value=1.0, max_value=5000.0, value=30.0, step=0.5, key="alt")
     with col3:
-        uln_ast = st.number_input("ULN AST (U/L)", min_value=10.0, max_value=100.0, value=40.0, step=1.0, help="Upper limit of normal for your lab", key="uln_ast")
+        uln_ast = st.number_input("ULN AST (U/L)", min_value=10.0, max_value=100.0, value=40.0, step=1.0,
+                                   help="Upper limit of normal for your lab", key="uln_ast")
         platelets = st.number_input("Platelets (10⁹/L)", min_value=20.0, max_value=1000.0, value=230.0, step=1.0, key="platelets")
         albumin = st.number_input("Albumin (g/dL)", min_value=1.0, max_value=6.0, value=4.2, step=0.1, key="albumin")
         diab_ifg = st.selectbox("Diabetes / IFG", ["No", "Yes"], key="diab")
@@ -288,17 +298,16 @@ with st.expander("Batch Processing (CSV upload)"):
     file = st.file_uploader("Upload CSV", type=["csv"], key="csvu")
     if file is not None:
         df = pd.read_csv(file)
-        # Normalize columns
         rename_map = {
-            'age':'age', 'sex':'sex', 'bmi':'bmi', 'waist_cm':'waist_cm', 'waist':'waist_cm',
-            'tg_mgdl':'tg_mgdl', 'tg':'tg_mgdl', 'triglycerides':'tg_mgdl',
-            'ggt_ul':'ggt_ul', 'ggt':'ggt_ul',
-            'ast_ul':'ast_ul', 'ast':'ast_ul',
-            'alt_ul':'alt_ul', 'alt':'alt_ul',
-            'uln_ast':'uln_ast',
-            'platelets':'platelets',
-            'albumin_gdl':'albumin_gdl', 'albumin':'albumin_gdl',
-            'diab_ifg':'diab_ifg', 'diabetes':'diab_ifg'
+            'age': 'age', 'sex': 'sex', 'bmi': 'bmi', 'waist_cm': 'waist_cm', 'waist': 'waist_cm',
+            'tg_mgdl': 'tg_mgdl', 'tg': 'tg_mgdl', 'triglycerides': 'tg_mgdl',
+            'ggt_ul': 'ggt_ul', 'ggt': 'ggt_ul',
+            'ast_ul': 'ast_ul', 'ast': 'ast_ul',
+            'alt_ul': 'alt_ul', 'alt': 'alt_ul',
+            'uln_ast': 'uln_ast',
+            'platelets': 'platelets',
+            'albumin_gdl': 'albumin_gdl', 'albumin': 'albumin_gdl',
+            'diab_ifg': 'diab_ifg', 'diabetes': 'diab_ifg'
         }
         df = df.rename(columns={c: rename_map.get(str(c).strip().lower(), c) for c in df.columns})
 
@@ -317,8 +326,8 @@ with st.expander("Batch Processing (CSV upload)"):
                 alb = float(r.get("albumin_gdl", float("nan"))) if pd.notna(r.get("albumin_gdl")) else None
                 diab = int(r.get("diab_ifg", 0)) if pd.notna(r.get("diab_ifg")) else 0
             except Exception:
-                age=bmi=waist=tg=ggt=ast=alt=uln=plate=alb=None
-                diab=0
+                age = bmi = waist = tg = ggt = ast = alt = uln = plate = alb = None
+                diab = 0
 
             fli = fli_score(tg, bmi, ggt, waist)
             fli_cat, fli_act, _ = fli_category_action(fli)
@@ -335,14 +344,15 @@ with st.expander("Batch Processing (CSV upload)"):
                 "tg_mgdl": r.get("tg_mgdl"), "ggt_ul": r.get("ggt_ul"),
                 "ast_ul": r.get("ast_ul"), "alt_ul": r.get("alt_ul"), "uln_ast": r.get("uln_ast"),
                 "platelets": r.get("platelets"), "albumin_gdl": r.get("albumin_gdl"), "diab_ifg": r.get("diab_ifg"),
-                "FLI": None if fli is None else round(fli,1), "FLI_category": fli_cat, "FLI_action": fli_act,
-                "FIB4": None if fib4 is None else round(fib4,3),
-                "APRI": None if apri is None else round(apri,3),
-                "NFS": None if nfs is None else round(nfs,3),
-                "LiverHealth100": None if liver100 is None else round(liver100,1)
+                "FLI": None if fli is None else round(fli, 1), "FLI_category": fli_cat, "FLI_action": fli_act,
+                "FIB4": None if fib4 is None else round(fib4, 3),
+                "APRI": None if apri is None else round(apri, 3),
+                "NFS": None if nfs is None else round(nfs, 3),
+                "LiverHealth100": None if liver100 is None else round(liver100, 1)
             })
         out = pd.DataFrame(results)
         st.dataframe(out, use_container_width=True)
-        st.download_button("Download results CSV", data=out.to_csv(index=False).encode("utf-8"), file_name="nafld_results.csv", mime="text/csv")
+        st.download_button("Download results CSV", data=out.to_csv(index=False).encode("utf-8"),
+                           file_name="nafld_results.csv", mime="text/csv")
 
 st.caption("Disclaimer: For screening and educational purposes only. Not a substitute for professional medical advice.")
