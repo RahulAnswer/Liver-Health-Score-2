@@ -1,5 +1,6 @@
 import math
 import re
+import io
 from typing import Optional, Tuple, Dict
 
 import streamlit as st
@@ -12,7 +13,17 @@ try:
 except Exception:
     PDF_ENABLED = False
 
-st.set_page_config(page_title="Liver Health Assessment (Validated Option A)", layout="wide")
+# PDF creation
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    REPORTLAB_ENABLED = True
+except Exception:
+    REPORTLAB_ENABLED = False
+
+st.set_page_config(page_title="Liver Health Assessment (Validated Option A) — PDF Ready", layout="wide")
 
 # ---------- Utility functions ----------
 def _safe_log(x: Optional[float]) -> Optional[float]:
@@ -146,6 +157,7 @@ def color_box(text: str, color: str):
     )
 
 # ---- Safety clamp for values coming from PDF/session ----
+
 def _clamp(v, lo, hi):
     try:
         x = float(v)
@@ -154,6 +166,7 @@ def _clamp(v, lo, hi):
     if x < lo: return lo
     if x > hi: return hi
     return x
+
 
 def sanitize_state():
     limits = {
@@ -176,14 +189,20 @@ def sanitize_state():
 
 # ---------- PDF Parsing (STRICT first, LOOSE fallback) ----------
 STRICT_PATTERNS = {
+    # Labs
     "ast_ul": r"(?:AST|SGOT)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
     "alt_ul": r"(?:ALT|SGPT)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
     "ggt_ul": r"(?:GGT|Gamma[\-\s]*glutamyl[\-\s]*transferase)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
     "tg_mgdl": r"(?:Triglycerides?|TG)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}mg/?dL)",
     "platelets": r"(?:Platelets?|Platelet\s*count)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,30}(?:10\^9/?L|10\^3/?µ?L))",
     "albumin_gdl": r"(?:Albumin)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}g/?[dD][lL])",
-    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})\s*(?:U/?L|IU/?L)?"
+    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})\s*(?:U/?L|IU/?L)?",
+    # Demographics
+    "name": r"(?:Patient\s*Name|Name)\s*[:\-]\s*([A-Za-z][A-Za-z\s\.\-']{1,60})",
+    "sex": r"(?:Sex|Gender)\s*[:\-]\s*(Male|Female|M|F)",
+    "age": r"(?:Age)\s*[:\-]\s*(\d{1,3})(?:\s*(?:years?|yrs?|y))?",
 }
+
 LOOSE_PATTERNS = {
     "ast_ul": r"(?:AST|SGOT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "alt_ul": r"(?:ALT|SGPT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
@@ -191,8 +210,13 @@ LOOSE_PATTERNS = {
     "tg_mgdl": r"(?:Triglycerides?|TG)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "platelets": r"(?:Platelets?|Platelet\s*count)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "albumin_gdl": r"(?:Albumin)[^\d]{0,80}?(\d+(?:\.\d+)?)",
-    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})"
+    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})",
+    # Demographics (looser)
+    "name": r"(?:Patient\s*Name|Name)[^\n]{0,20}([A-Za-z][A-Za-z\s\.\-']{1,60})",
+    "sex": r"(?:Sex|Gender)[^\n]{0,20}(Male|Female|M|F)",
+    "age": r"(?:Age)[^\d]{0,20}(\d{1,3})",
 }
+
 
 def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
     out: Dict[str, float] = {}
@@ -228,7 +252,7 @@ def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
             m = re.search(LOOSE_PATTERNS[key], text, flags=re.I)
         if m:
             try:
-                out[key] = float(m.group(1))
+                out[key] = m.group(1).strip()
             except Exception:
                 pass
 
@@ -237,14 +261,32 @@ def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
 
     # Albumin g/L → g/dL if unit nearby indicates g/L
     if "albumin_gdl" in out:
+        try:
+            out["albumin_gdl"] = float(out["albumin_gdl"])
+        except Exception:
+            out["albumin_gdl"] = None
         m = re.search(r"Albumin[^\n]{0,40}?(\d+(?:\.\d+)?)\s*(g/?dL|g/?L)", text, flags=re.I)
         if m and "g/L" in m.group(2).replace(" ", "").lower():
-            out["albumin_gdl"] = out["albumin_gdl"] / 10.0
+            if isinstance(out["albumin_gdl"], (int, float)):
+                out["albumin_gdl"] = out["albumin_gdl"] / 10.0
+
+    # Cast numeric fields that need to be float
+    for num_key in ["ast_ul", "alt_ul", "ggt_ul", "tg_mgdl", "platelets", "albumin_gdl", "uln_ast", "age"]:
+        if num_key in out:
+            try:
+                out[num_key] = float(out[num_key])
+            except Exception:
+                out[num_key] = None
+
+    # Normalize sex to M/F
+    if "sex" in out:
+        s = str(out["sex"]).strip().upper()
+        out["sex"] = "F" if s.startswith("F") else ("M" if s.startswith("M") else s)
 
     return out, full
 
 # ---------- App UI ----------
-st.title("Liver Health Assessment Tool — Validated Option A")
+st.title("Liver Health Assessment Tool — Validated Option A (with PDF)")
 st.caption("Uses FLI (steatosis screening) and fibrosis scores (FIB-4, APRI, NFS). Liver Health 0–100 is based on fibrosis only.")
 
 with st.expander("Upload Lab PDF (beta: text-based PDFs only)"):
@@ -256,12 +298,20 @@ with st.expander("Upload Lab PDF (beta: text-based PDFs only)"):
             data, raw_text = parse_pdf_bytes_return_text(up)
             if data:
                 st.success("Parsed these fields from the PDF (you can edit below):")
-                st.json({k: round(v, 3) for k, v in data.items()})
+                # Round numeric values only for display
+                preview = {}
+                for k, v in data.items():
+                    if isinstance(v, (int, float)) and v is not None:
+                        preview[k] = round(float(v), 3)
+                    else:
+                        preview[k] = v
+                st.json(preview)
                 mapping = {"ast_ul": "ast", "alt_ul": "alt", "ggt_ul": "ggt", "tg_mgdl": "tg",
-                           "platelets": "platelets", "albumin_gdl": "albumin", "uln_ast": "uln_ast"}
+                           "platelets": "platelets", "albumin_gdl": "albumin", "uln_ast": "uln_ast",
+                           "age": "age", "sex": "sex", "name": "name"}
                 for key, val in data.items():
                     if key in mapping:
-                        st.session_state[mapping[key]] = float(val)
+                        st.session_state[mapping[key]] = val
                 # clamp to safe ranges to prevent widget errors
                 sanitize_state()
             else:
@@ -271,25 +321,29 @@ with st.expander("Upload Lab PDF (beta: text-based PDFs only)"):
                 st.text(raw_text if raw_text else "No text extracted.")
 
 with st.expander("Single-Patient Assessment", expanded=True):
-    col1, col2, col3 = st.columns(3)
+    col0, col1, col2, col3 = st.columns(4)
+    with col0:
+        name = st.text_input("Patient Name", value=st.session_state.get("name", ""), key="name")
+        sex = st.selectbox("Sex", ["M", "F"], index=(0 if st.session_state.get("sex", "M") == "M" else 1), key="sex")
+        age = st.number_input("Age (years)", min_value=0, max_value=120, value=int(st.session_state.get("age", 40)), step=1, key="age")
     with col1:
-        age = st.number_input("Age (years)", min_value=0, max_value=120, value=40, step=1, key="age")
-        sex = st.selectbox("Sex", ["M", "F"], key="sex")
-        bmi = st.number_input("BMI (kg/m²)", min_value=10.0, max_value=80.0, value=27.0, step=0.1, key="bmi")
-        waist_cm = st.number_input("Waist circumference (cm)", min_value=40.0, max_value=200.0, value=95.0, step=0.5, key="waist")
+        bmi = st.number_input("BMI (kg/m²)", min_value=10.0, max_value=80.0, value=float(st.session_state.get("bmi", 27.0)), step=0.1, key="bmi")
+        waist_cm = st.number_input("Waist circumference (cm)", min_value=40.0, max_value=200.0, value=float(st.session_state.get("waist", 95.0)), step=0.5, key="waist")
     with col2:
-        tg = st.number_input("Triglycerides (mg/dL)", min_value=10.0, max_value=2000.0, value=160.0, step=1.0, key="tg")
-        ggt = st.number_input("GGT (U/L)", min_value=1.0, max_value=2000.0, value=45.0, step=1.0, key="ggt")
-        ast = st.number_input("AST (U/L)", min_value=1.0, max_value=5000.0, value=35.0, step=0.5, key="ast")
-        alt = st.number_input("ALT (U/L)", min_value=1.0, max_value=5000.0, value=30.0, step=0.5, key="alt")
+        tg = st.number_input("Triglycerides (mg/dL)", min_value=10.0, max_value=2000.0, value=float(st.session_state.get("tg", 160.0)), step=1.0, key="tg")
+        ggt = st.number_input("GGT (U/L)", min_value=1.0, max_value=2000.0, value=float(st.session_state.get("ggt", 45.0)), step=1.0, key="ggt")
+        ast = st.number_input("AST (U/L)", min_value=1.0, max_value=5000.0, value=float(st.session_state.get("ast", 35.0)), step=0.5, key="ast")
+        alt = st.number_input("ALT (U/L)", min_value=1.0, max_value=5000.0, value=float(st.session_state.get("alt", 30.0)), step=0.5, key="alt")
     with col3:
-        uln_ast = st.number_input("ULN AST (U/L)", min_value=10.0, max_value=100.0, value=40.0, step=1.0,
+        uln_ast = st.number_input("ULN AST (U/L)", min_value=10.0, max_value=100.0, value=float(st.session_state.get("uln_ast", 40.0)), step=1.0,
                                    help="Upper limit of normal for your lab", key="uln_ast")
-        platelets = st.number_input("Platelets (10⁹/L)", min_value=20.0, max_value=1000.0, value=230.0, step=1.0, key="platelets")
-        albumin = st.number_input("Albumin (g/dL)", min_value=1.0, max_value=6.0, value=4.2, step=0.1, key="albumin")
-        diab_ifg = st.selectbox("Diabetes / IFG", ["No", "Yes"], key="diab")
+        platelets = st.number_input("Platelets (10⁹/L)", min_value=20.0, max_value=1000.0, value=float(st.session_state.get("platelets", 230.0)), step=1.0, key="platelets")
+        albumin = st.number_input("Albumin (g/dL)", min_value=1.0, max_value=6.0, value=float(st.session_state.get("albumin", 4.2)), step=0.1, key="albumin")
+        diab_ifg = st.selectbox("Diabetes / IFG", ["No", "Yes"], index=(1 if str(st.session_state.get("diab", "No")) in ["1", "Yes"] else 0), key="diab")
 
     diab_flag = 1 if diab_ifg == "Yes" else 0
+
+    pdf_bytes = None
 
     if st.button("Calculate"):
         fli = fli_score(tg, bmi, ggt, waist_cm)
@@ -309,6 +363,9 @@ with st.expander("Single-Patient Assessment", expanded=True):
 
         st.subheader("Results")
 
+        st.markdown("**Patient**")
+        st.write(f"Name: {name or '—'}  |  Sex: {sex}  |  Age: {age} years")
+
         st.markdown("**Step 1 — Fatty Liver (Steatosis) Screening (FLI)**")
         color_box(f"FLI: {fli:.1f}  •  {fli_cat}", fli_color) if fli is not None else st.info("Insufficient inputs for FLI.")
         st.caption(f"Action: {fli_act}") if fli_act else None
@@ -325,6 +382,7 @@ with st.expander("Single-Patient Assessment", expanded=True):
 
         st.markdown("---")
         st.markdown("**Fibrosis-based Liver Health Score (0–100; higher is better)**")
+        l_text = None
         if liver100 is not None:
             if liver100 >= 85:
                 l_color = "#2e7d32"
@@ -339,12 +397,76 @@ with st.expander("Single-Patient Assessment", expanded=True):
         else:
             st.info("Insufficient inputs to compute the fibrosis-based Liver Health Score.")
 
+        # ---------- Build PDF ----------
+        if REPORTLAB_ENABLED:
+            buf = io.BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=A4, title="Liver Health Report")
+            styles = getSampleStyleSheet()
+            story = []
+
+            title = f"<b>Liver Health Report</b>"
+            story.append(Paragraph(title, styles["Title"]))
+            story.append(Spacer(1, 8))
+
+            pinfo = f"<b>Patient:</b> {name or '—'} &nbsp;&nbsp; <b>Sex:</b> {sex} &nbsp;&nbsp; <b>Age:</b> {int(age)} years"
+            story.append(Paragraph(pinfo, styles["Normal"]))
+            story.append(Spacer(1, 10))
+
+            # Table of results
+            rows = [["Metric", "Value", "Interpretation / Action"]]
+            rows.append(["FLI", f"{fli:.1f}" if fli is not None else "—", (f"{fli_cat}. {fli_act}" if fli is not None else "Insufficient inputs")])
+            rows.append(["FIB-4", f"{fib4:.3f}" if fib4 is not None else "—", (
+                "Advanced fibrosis unlikely; routine monitoring." if fib4 is not None and fib4 <= 1.3 else (
+                "Indeterminate; consider elastography (FibroScan)." if fib4 is not None and fib4 < 2.67 else (
+                "Advanced fibrosis likely; refer to hepatology." if fib4 is not None else "Insufficient inputs"
+            ))])
+            rows.append(["APRI", f"{apri:.3f}" if apri is not None else "—", (
+                "Significant fibrosis unlikely." if apri is not None and apri < 0.5 else (
+                "Indeterminate; consider elastography / repeat testing." if apri is not None and apri < 1.0 else (
+                "Advanced fibrosis likely; specialist referral." if apri is not None else "Insufficient inputs"
+            ))])
+            rows.append(["NFS", f"{nfs:.3f}" if nfs is not None else "—", (
+                "Advanced fibrosis unlikely." if nfs is not None and nfs < -1.455 else (
+                "Indeterminate; consider elastography / specialist assessment." if nfs is not None and nfs <= 0.675 else (
+                "Advanced fibrosis likely; specialist referral." if nfs is not None else "Insufficient inputs"
+            ))])
+            rows.append(["Liver Health (0–100)", f"{liver100:.1f}" if liver100 is not None else "—", (l_text or "Insufficient inputs")])
+
+            tbl = Table(rows, hAlign='LEFT', colWidths=[130, 100, 260])
+            tbl.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#eeeeee')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+                ('GRID', (0,0), (-1,-1), 0.25, colors.grey),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#fafafa')]),
+            ]))
+            story.append(tbl)
+
+            story.append(Spacer(1, 12))
+            story.append(Paragraph("<b>Disclaimer:</b> This report is for screening and educational purposes only and is not a substitute for professional medical advice.", styles['Italic']))
+
+            doc.build(story)
+            pdf_bytes = buf.getvalue()
+            buf.close()
+        else:
+            st.error("reportlab is not available. Please ensure it's added to requirements.txt.")
+
+        if pdf_bytes:
+            st.download_button(
+                "Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"liver_health_report_{(name or 'patient').replace(' ', '_')}.pdf",
+                mime="application/pdf",
+            )
+
 with st.expander("Batch Processing (CSV upload)"):
-    st.markdown("Template columns (case-insensitive): **age, sex, bmi, waist_cm, tg_mgdl, ggt_ul, ast_ul, alt_ul, uln_ast, platelets, albumin_gdl, diab_ifg**")
+    st.markdown("Template columns (case-insensitive): **name, age, sex, bmi, waist_cm, tg_mgdl, ggt_ul, ast_ul, alt_ul, uln_ast, platelets, albumin_gdl, diab_ifg**")
     file = st.file_uploader("Upload CSV", type=["csv"], key="csvu")
     if file is not None:
         df = pd.read_csv(file)
         rename_map = {
+            'name': 'name', 'patientname': 'name',
             'age': 'age', 'sex': 'sex', 'bmi': 'bmi', 'waist_cm': 'waist_cm', 'waist': 'waist_cm',
             'tg_mgdl': 'tg_mgdl', 'tg': 'tg_mgdl', 'triglycerides': 'tg_mgdl',
             'ggt_ul': 'ggt_ul', 'ggt': 'ggt_ul',
@@ -386,7 +508,7 @@ with st.expander("Batch Processing (CSV upload)"):
             liver100 = combine_liver_health(fib4_sub, apri_sub, nfs_sub)
 
             results.append({
-                "age": r.get("age"), "sex": r.get("sex"), "bmi": r.get("bmi"), "waist_cm": r.get("waist_cm"),
+                "name": r.get("name"), "age": r.get("age"), "sex": r.get("sex"), "bmi": r.get("bmi"), "waist_cm": r.get("waist_cm"),
                 "tg_mgdl": r.get("tg_mgdl"), "ggt_ul": r.get("ggt_ul"),
                 "ast_ul": r.get("ast_ul"), "alt_ul": r.get("alt_ul"), "uln_ast": r.get("uln_ast"),
                 "platelets": r.get("platelets"), "albumin_gdl": r.get("albumin_gdl"), "diab_ifg": r.get("diab_ifg"),
