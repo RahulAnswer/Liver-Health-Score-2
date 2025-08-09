@@ -206,7 +206,23 @@ def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
 
     text = re.sub(r"[^\S\r\n]+", " ", full, flags=re.M).replace("\u00b5", "µ")
 
+    # --- ULN AST: prefer capturing the upper value from a range like "3 - 50" on the AST line ---
+    if "uln_ast" not in out:
+        ULN_RANGE_PATTERNS = [
+            r"(?:AST|SGOT)[^\n]*?U/?L[^\n]*?(\d{1,3})\s*[-–‐]\s*(\d{2,3})",  # ...U/L ... 3 - 50
+            r"(?:AST|SGOT)[^\n]*?(?:ref(?:erence)?\s*(?:range|interval)|bio\.?\s*ref.*?|range)[^\n]*?(\d{1,3})\s*[-–‐]\s*(\d{2,3})"
+        ]
+        for pat in ULN_RANGE_PATTERNS:
+            m = re.search(pat, text, flags=re.I)
+            if m:
+                lo_v, hi_v = int(m.group(1)), int(m.group(2))
+                out["uln_ast"] = float(max(lo_v, hi_v))
+                break
+
     def search_and_set(key):
+        # Don't overwrite uln_ast if we already captured a range
+        if key == "uln_ast" and "uln_ast" in out:
+            return
         m = re.search(STRICT_PATTERNS[key], text, flags=re.I)
         if not m:
             m = re.search(LOOSE_PATTERNS[key], text, flags=re.I)
