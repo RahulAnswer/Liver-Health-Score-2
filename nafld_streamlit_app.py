@@ -15,7 +15,6 @@ except Exception:
 st.set_page_config(page_title="Liver Health Assessment (Validated Option A)", layout="wide")
 
 # ---------- Utility functions ----------
-
 def _safe_log(x: Optional[float]) -> Optional[float]:
     try:
         if x is None or float(x) <= 0:
@@ -146,50 +145,81 @@ def color_box(text: str, color: str):
         unsafe_allow_html=True,
     )
 
-# ---------- PDF Parsing (tolerant) ----------
+# ---- Safety clamp for values coming from PDF/session ----
+def _clamp(v, lo, hi):
+    try:
+        x = float(v)
+    except Exception:
+        return None
+    if x < lo: return lo
+    if x > hi: return hi
+    return x
 
-# Looser patterns: unit optional; tolerate line breaks / spacing between label and value
-LAB_PATTERNS = {
+def sanitize_state():
+    limits = {
+        "tg": (10, 5000),
+        "ggt": (1, 2000),
+        "ast": (1, 5000),
+        "alt": (1, 5000),
+        "uln_ast": (5, 200),
+        "platelets": (20, 1000),   # 10^9/L
+        "albumin": (1, 6),
+        "bmi": (10, 80),
+        "waist": (40, 200),
+        "age": (0, 120),
+    }
+    for k, (lo, hi) in limits.items():
+        if k in st.session_state:
+            v = _clamp(st.session_state[k], lo, hi)
+            if v is not None:
+                st.session_state[k] = v
+
+# ---------- PDF Parsing (STRICT first, LOOSE fallback) ----------
+STRICT_PATTERNS = {
+    "ast_ul": r"(?:AST|SGOT)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
+    "alt_ul": r"(?:ALT|SGPT)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
+    "ggt_ul": r"(?:GGT|Gamma[\-\s]*glutamyl[\-\s]*transferase)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}(?:U/?L|IU/?L))",
+    "tg_mgdl": r"(?:Triglycerides?|TG)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}mg/?dL)",
+    "platelets": r"(?:Platelets?|Platelet\s*count)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,30}(?:10\^9/?L|10\^3/?µ?L))",
+    "albumin_gdl": r"(?:Albumin)[^\n]{0,80}?(\d+(?:\.\d+)?)(?=[^\n]{0,20}g/?[dD][lL])",
+    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})\s*(?:U/?L|IU/?L)?"
+}
+LOOSE_PATTERNS = {
     "ast_ul": r"(?:AST|SGOT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "alt_ul": r"(?:ALT|SGPT)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "ggt_ul": r"(?:GGT|Gamma[\-\s]*glutamyl[\-\s]*transferase)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "tg_mgdl": r"(?:Triglycerides?|TG)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "platelets": r"(?:Platelets?|Platelet\s*count)[^\d]{0,80}?(\d+(?:\.\d+)?)",
     "albumin_gdl": r"(?:Albumin)[^\d]{0,80}?(\d+(?:\.\d+)?)",
-    # Try to infer ULN AST from a range like "3 - 50 U/L" on same line as the word range
-    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})\s*(?:U/?L|IU/?L)?",
+    "uln_ast": r"(?:AST|SGOT)[^\n]{0,80}?(?:ref(?:erence)?\s*range|range)[^\n]{0,40}?(\d{2,3})"
 }
 
 def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
-    """
-    Return (values_dict, full_text) for debug.
-    """
     out: Dict[str, float] = {}
     full = ""
     try:
         with pdfplumber.open(pdf_bytes) as pdf:
-            texts = []
-            for page in pdf.pages:
-                texts.append(page.extract_text() or "")
+            texts = [page.extract_text() or "" for page in pdf.pages]
             full = "\n".join(texts)
     except Exception:
         return out, full
 
-    text = re.sub(r"[^\S\r\n]+", " ", full, flags=re.M)
-    text = text.replace("\u00b5", "µ")
+    text = re.sub(r"[^\S\r\n]+", " ", full, flags=re.M).replace("\u00b5", "µ")
 
-    def search_and_set(key, pattern):
-        m = re.search(pattern, text, flags=re.I)
+    def search_and_set(key):
+        m = re.search(STRICT_PATTERNS[key], text, flags=re.I)
+        if not m:
+            m = re.search(LOOSE_PATTERNS[key], text, flags=re.I)
         if m:
             try:
                 out[key] = float(m.group(1))
             except Exception:
                 pass
 
-    for k, pattern in LAB_PATTERNS.items():
-        search_and_set(k, pattern)
+    for k in STRICT_PATTERNS.keys():
+        search_and_set(k)
 
-    # Albumin g/L → g/dL if we can detect the g/L unit nearby
+    # Albumin g/L → g/dL if unit nearby indicates g/L
     if "albumin_gdl" in out:
         m = re.search(r"Albumin[^\n]{0,40}?(\d+(?:\.\d+)?)\s*(g/?dL|g/?L)", text, flags=re.I)
         if m and "g/L" in m.group(2).replace(" ", "").lower():
@@ -198,7 +228,6 @@ def parse_pdf_bytes_return_text(pdf_bytes) -> Tuple[Dict[str, float], str]:
     return out, full
 
 # ---------- App UI ----------
-
 st.title("Liver Health Assessment Tool — Validated Option A")
 st.caption("Uses FLI (steatosis screening) and fibrosis scores (FIB-4, APRI, NFS). Liver Health 0–100 is based on fibrosis only.")
 
@@ -212,12 +241,13 @@ with st.expander("Upload Lab PDF (beta: text-based PDFs only)"):
             if data:
                 st.success("Parsed these fields from the PDF (you can edit below):")
                 st.json({k: round(v, 3) for k, v in data.items()})
-                # Pre-fill widgets
                 mapping = {"ast_ul": "ast", "alt_ul": "alt", "ggt_ul": "ggt", "tg_mgdl": "tg",
                            "platelets": "platelets", "albumin_gdl": "albumin", "uln_ast": "uln_ast"}
                 for key, val in data.items():
                     if key in mapping:
                         st.session_state[mapping[key]] = float(val)
+                # clamp to safe ranges to prevent widget errors
+                sanitize_state()
             else:
                 st.info("Couldn't read values. If the PDF is scanned, please type manually.")
 
